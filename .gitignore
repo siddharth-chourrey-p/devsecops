@@ -17,8 +17,6 @@ crash.log
 .env
 *.pem
 *.key
-*.tfvars
-
 # ===== Logs =====
 *.log
 
