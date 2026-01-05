@@ -13,11 +13,6 @@ variable "instance_type" {
   description = "EC2 instance type"
 }
 
-variable "app_port" {
-  type = map(number)
-  description = "Ports allowed in SG "
-}
-
 variable "vpc_cidr" {
   default = "192.168.1.0/24"
   description = "VPC cidr block"
@@ -36,10 +31,25 @@ variable "private_subnet_cidr" {
 variable "jenkins_pb_key_path" {
   type        = string
   description = "Path to an SSH public key file"
+
+  validation {
+    condition     = fileexists(var.jenkins_pb_key_path)
+    error_message = "public key file does not exist."
+  }
 }
 
 variable "my_public_ip" {
   type  = string
   description = "public ip for ssh into ec2"
+}
+
+variable "ingress_ports" {
+  type    = list(number)
+  description = "List of ingress ports for security group"
+}
+
+variable "egress_ports" {
+  type = list(number)
+  description = "List of egress ports for security group"
 }
 
