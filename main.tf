@@ -1,4 +1,3 @@
-
 data "aws_ami" "amazon_linux" {
   most_recent = true
 
@@ -70,5 +69,3 @@ module "ec2" {
     pb_key                = "jenkins-key"
     security_group_id   = module.sg.security_group_id
 }
-
-
