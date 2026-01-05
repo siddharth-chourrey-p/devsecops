@@ -1,126 +1,3 @@
-terraform {
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-  }
-}
-provider "aws" {
-    region = var.aws_region
-}
-
-####################################
-# VPC
-####################################
-
-resource "aws_vpc" "main" {
-  cidr_block = var.vpc_cidr
-
-  tags = {
-    Name = "Demo-VPC"
-  }
-}
-
-####################################
-# SUBNETS
-####################################
-
-resource "aws_subnet" "public" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = var.public_subnet_cidr
-  map_public_ip_on_launch = true
-
-  tags = {
-    Name = "Public-Subnet"
-  }
-}
-
-resource "aws_subnet" "private" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = var.private_subnet_cidr
-
-  tags = {
-    Name = "Private-Subnet"
-  }
-}
-
-####################################
-# INTERNET GATEWAY + ROUTE TABLE
-####################################
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.main.id
-  tags = {
-    Name = "Demo-IGW"
-  }
-
-}
-
-resource "aws_route_table" "public_rt" {
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.igw.id
-  }
-
-  tags = {
-    Name = "Public-route-table"
-  }
-}
-
-resource "aws_route_table_association" "public_rt_association" {
-  subnet_id      = aws_subnet.public.id
-  route_table_id = aws_route_table.public_rt.id
-}
-
-####################################
-# SECURITY GROUP
-####################################
-resource "aws_security_group" "jenkins_sg" {
-  name        = "jenkins_sg"
-  description = "Allow Jenkins Traffic"
-  vpc_id      = aws_vpc.main.id
-  tags = {
-    Name = "Jenkins SG"
-  }
-}
-
-# App Ports (dynamic)
-resource "aws_security_group_rule" "app_ports" {
-  for_each          = var.app_port
-  type              = "ingress"
-  from_port         = each.value
-  to_port           = each.value
-  protocol          = "tcp"
-  security_group_id = aws_security_group.jenkins_sg.id
-  description       = "Allow ${each.key} traffic"
-  cidr_blocks       = [var.my_public_ip]
-}
-
-# SSH Rule restricted to your public IP
-resource "aws_security_group_rule" "ssh_access" {
-  type              = "ingress"
-  from_port         = 22
-  to_port           = 22
-  protocol          = "tcp"
-  security_group_id = aws_security_group.jenkins_sg.id
-  cidr_blocks       = [var.my_public_ip]
-  description       = "Allow SSH from my IP"
-}
-
-# Allow outbound traffic
-resource "aws_security_group_rule" "outbound" {
-  type              = "egress"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
-  cidr_blocks       = ["0.0.0.0/0"]
-  security_group_id = aws_security_group.jenkins_sg.id
-}
-
-
-
 data "aws_ami" "amazon_linux" {
   most_recent = true
 
@@ -142,72 +19,283 @@ data "aws_ami" "amazon_linux" {
   owners = ["amazon"] # Canonical
 }
 
-# --- IAM Role for Jenkins EC2 ---
 
-resource "aws_iam_role" "jenkins_role" {
-  name = "jenkins_role"
 
-  assume_role_policy = <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Action": "sts:AssumeRole",
-      "Principal": {
-        "Service": "ec2.amazonaws.com"
-      },
-      "Effect": "Allow",
-      "Sid": ""
-    }
-  ]
-}
-EOF
+module "vpc" {
+  source = "./modules/vpc"
+
+  vpc_config = {
+    cidr_block  = "192.168.1.0/24"
+    name        = "main-vpc"
+  }
+
+  public_subnet_cidr  = var.public_subnet_cidr
+  private_subnet_cidr = var.private_subnet_cidr
+  az = "ap-south-1a"
 }
 
+module "sg" {
+  source = "./modules/sg"
 
-resource "aws_iam_instance_profile" "test_profile" {
-  name = "test_profile"
-  role = aws_iam_role.jenkins_role.name
+  vpc_id = module.vpc.vpc_id
+  my_public_ip = var.my_public_ip
+  ingress_ports = var.ingress_ports
+  egress_ports = var.egress_ports
 }
 
-# Attach IAM policy to Jenkins role
-resource "aws_iam_role_policy" "test_policy" {
-  name = "test_policy"
-  role = aws_iam_role.jenkins_role.id
 
-  policy = <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-     {
-            "Effect": "Allow",
-            "Action": "*",
-            "Resource": "*"
-     }
-  ]
+module "iam" {
+  source = "./modules/iam"
+
+  role_name             = "jenkins-role"
+  instance_profile_name = "ec2-profile"
+  policy_name           = "jenkins-policy"
 }
-EOF
-}
-### key pair ####
-resource "aws_key_pair" "pb_key" {
-  key_name   = var.key_name
+
+
+# key pair
+resource "aws_key_pair" "jenkins_key" {
+  key_name   = "jenkins-key"
   public_key = file(var.jenkins_pb_key_path)
 }
+module "ec2" {
+  source = "./modules/ec2"
 
-
-####################################
-# EC2 INSTANCE
-####################################
-resource "aws_instance" "jenkins_web" {
-  ami             = data.aws_ami.amazon_linux.id
-  instance_type   = var.instance_type
-  key_name        = var.key_name
-  iam_instance_profile = aws_iam_instance_profile.test_profile.name
-  vpc_security_group_ids = [aws_security_group.jenkins_sg.id]
-  subnet_id = aws_subnet.public.id
-  user_data       = file("install_jenkins.sh")
-
-  tags = {
-    Name = "Jenkins"
-  }
+    ami_id          = data.aws_ami.amazon_linux.id
+    instance_type   = "t2.micro"
+    subnet_id       = module.vpc.public_subnet_id
+    instance_name   = "jenkins-ec2"
+    instance_profile_name = module.iam.instance_profile_name
+    pb_key                = "jenkins-key"
+    security_group_id   = module.sg.security_group_id
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# terraform {
+#   required_providers {
+#     aws = {
+#       source  = "hashicorp/aws"
+#       version = "~> 5.0"
+#     }
+#   }
+# }
+# provider "aws" {
+#     region = var.aws_region
+# }
+
+# ####################################
+# # VPC
+# ####################################
+
+# resource "aws_vpc" "main" {
+#   cidr_block = var.vpc_cidr
+
+#   tags = {
+#     Name = "Demo-VPC"
+#   }
+# }
+
+# ####################################
+# # SUBNETS
+# ####################################
+
+# resource "aws_subnet" "public" {
+#   vpc_id            = aws_vpc.main.id
+#   cidr_block        = var.public_subnet_cidr
+#   map_public_ip_on_launch = true
+
+#   tags = {
+#     Name = "Public-Subnet"
+#   }
+# }
+
+# resource "aws_subnet" "private" {
+#   vpc_id            = aws_vpc.main.id
+#   cidr_block        = var.private_subnet_cidr
+
+#   tags = {
+#     Name = "Private-Subnet"
+#   }
+# }
+
+# ####################################
+# # INTERNET GATEWAY + ROUTE TABLE
+# ####################################
+# resource "aws_internet_gateway" "igw" {
+#   vpc_id = aws_vpc.main.id
+#   tags = {
+#     Name = "Demo-IGW"
+#   }
+
+# }
+
+# resource "aws_route_table" "public_rt" {
+#   vpc_id = aws_vpc.main.id
+
+#   route {
+#     cidr_block = "0.0.0.0/0"
+#     gateway_id = aws_internet_gateway.igw.id
+#   }
+
+#   tags = {
+#     Name = "Public-route-table"
+#   }
+# }
+
+# resource "aws_route_table_association" "public_rt_association" {
+#   subnet_id      = aws_subnet.public.id
+#   route_table_id = aws_route_table.public_rt.id
+# }
+
+# ####################################
+# # SECURITY GROUP
+# ####################################
+# resource "aws_security_group" "jenkins_sg" {
+#   name        = "jenkins_sg"
+#   description = "Allow Jenkins Traffic"
+#   vpc_id      = aws_vpc.main.id
+#   tags = {
+#     Name = "Jenkins SG"
+#   }
+# }
+
+# # App Ports (dynamic)
+# resource "aws_security_group_rule" "app_ports" {
+#   for_each          = var.app_port
+#   type              = "ingress"
+#   from_port         = each.value
+#   to_port           = each.value
+#   protocol          = "tcp"
+#   security_group_id = aws_security_group.jenkins_sg.id
+#   description       = "Allow ${each.key} traffic"
+#   cidr_blocks       = [var.my_public_ip]
+# }
+
+# # SSH Rule restricted to your public IP
+# resource "aws_security_group_rule" "ssh_access" {
+#   type              = "ingress"
+#   from_port         = 22
+#   to_port           = 22
+#   protocol          = "tcp"
+#   security_group_id = aws_security_group.jenkins_sg.id
+#   cidr_blocks       = [var.my_public_ip]
+#   description       = "Allow SSH from my IP"
+# }
+
+# # Allow outbound traffic
+# resource "aws_security_group_rule" "outbound" {
+#   type              = "egress"
+#   from_port         = 0
+#   to_port           = 0
+#   protocol          = "-1"
+#   cidr_blocks       = ["0.0.0.0/0"]
+#   security_group_id = aws_security_group.jenkins_sg.id
+# }
+
+
+
+# # --- IAM Role for Jenkins EC2 ---
+
+# resource "aws_iam_role" "jenkins_role" {
+#   name = "jenkins_role"
+
+#   assume_role_policy = <<EOF
+# {
+#   "Version": "2012-10-17",
+#   "Statement": [
+#     {
+#       "Action": "sts:AssumeRole",
+#       "Principal": {
+#         "Service": "ec2.amazonaws.com"
+#       },
+#       "Effect": "Allow",
+#       "Sid": ""
+#     }
+#   ]
+# }
+# EOF
+# }
+
+
+# resource "aws_iam_instance_profile" "test_profile" {
+#   name = "test_profile"
+#   role = aws_iam_role.jenkins_role.name
+# }
+
+# # Attach IAM policy to Jenkins role
+# resource "aws_iam_role_policy" "test_policy" {
+#   name = "test_policy"
+#   role = aws_iam_role.jenkins_role.id
+
+#   policy = <<EOF
+# {
+#   "Version": "2012-10-17",
+#   "Statement": [
+#      {
+#             "Effect": "Allow",
+#             "Action": "*",
+#             "Resource": "*"
+#      }
+#   ]
+# }
+# EOF
+# }
+# ### key pair ####
+# resource "aws_key_pair" "pb_key" {
+#   key_name   = var.key_name
+#   public_key = file(var.jenkins_pb_key_path)
+# }
+
+
+# ####################################
+# # EC2 INSTANCE
+# ####################################
+# resource "aws_instance" "jenkins_web" {
+#   ami             = data.aws_ami.amazon_linux.id
+#   instance_type   = var.instance_type
+#   key_name        = var.key_name
+#   iam_instance_profile = aws_iam_instance_profile.test_profile.name
+#   vpc_security_group_ids = [aws_security_group.jenkins_sg.id]
+#   subnet_id = aws_subnet.public.id
+#   user_data       = file("install_jenkins.sh")
+
+#   tags = {
+#     Name = "Jenkins"
+#   }
+# # }
