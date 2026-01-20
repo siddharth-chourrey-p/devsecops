@@ -7,8 +7,7 @@ resource "aws_instance" "jenkins_ec2" {
   iam_instance_profile        = var.instance_profile_name
   key_name                    = var.pb_key
   associate_public_ip_address = true
-  user_data = file("${path.module}/userdata.sh")
-  
+  user_data = base64decode(file("${path.module}/userdata.sh"))
 
   tags = {
     Name = "jenkins_ec2"
